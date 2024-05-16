@@ -565,7 +565,7 @@ plot_age_depth_profile = function(soil_all, ages_all, aggr_layers, plot_IQR = tr
     return(plt)
 end
 
-add_calibration_PDFs = function(plt, calibration_data, plot_IQR = true, ylim = [-0.05,soildepth*1.1])
+add_calibration_data = function(plt, calibration_data, plot_IQR = true, ylim = [-0.05,soildepth*1.1])
     depths = unique(calibration_data[:,"depth"])
     modes = Array{Float64}(undef, 0)
     fbios = Array{Float64}(undef, 0)
