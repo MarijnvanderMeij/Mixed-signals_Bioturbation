@@ -1,7 +1,7 @@
 # Install and load required packages
 using Pkg
-neededPackages = [:StatsBase, :CSV, :DataFrames, :Plots, :JLD2, :KernelDensity, :KernelDensitySJ, :Statistics, :ProgressMeter, :ColorSchemes] 
-using Pkg;
+neededPackages = [:StatsBase, :CSV, :DataFrames, :Plots, :JLD2, :KernelDensity, :KernelDensitySJ, :Statistics, :StatsBase, :ProgressMeter, :ColorSchemes, :Distributed, :SharedArrays] 
+
 for neededpackage in neededPackages
     (String(neededpackage) in keys(Pkg.project().dependencies)) || Pkg.add(String(neededpackage))
     @eval using $neededpackage
@@ -322,7 +322,7 @@ end
 
 # Calibration functions
 create_calibration_parameters = function(cal_depthfunction, cal_BT_pot, cal_active_mixing_depth, cal_rel_process)
-    calib_pars = zeros(Float64, length(cal_depthfunction)*length(cal_BT_pot)*length(cal_active_mixing_depth)*length(cal_rel_process), 8) 
+    calib_pars = zeros(Float64, length(cal_depthfunction)*length(cal_BT_pot)*length(cal_active_mixing_depth)*length(cal_rel_process), 8)
     ct = 0
     for i1 in eachindex(cal_depthfunction)
         for i2 in eachindex(cal_BT_pot)
