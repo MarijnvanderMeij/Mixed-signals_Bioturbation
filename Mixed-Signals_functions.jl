@@ -139,7 +139,7 @@ update_luminescence = function(soil, ages) # Update OSL properties: thickness of
     return soil, ages
 end
 
-transfer_OSL = function(soil, ages, layer, otherlayer, P_layer, P_otherlayer) # Transfer OSL particles in between layers, based on transfer probability    
+transfer_OSL = function(soil, ages, layer, otherlayer, P_layer, P_otherlayer, new_beta_heterogeneity = false) # Transfer OSL particles in between layers, based on transfer probability    
     ages_from = ages[layer]
     ages_to = ages[otherlayer]
     if isnan(P_layer) || isinf(P_layer)
@@ -154,9 +154,12 @@ transfer_OSL = function(soil, ages, layer, otherlayer, P_layer, P_otherlayer) # 
     
     # Select rows to transfer and reset beta dose heterogeneity
     transfer_l = ages_from[ind_l, :]
-    transfer_l[:, 4] = calc_beta_heterogeneity(sum(ind_l))
     transfer_ol = ages_to[ind_ol, :]
-    transfer_ol[:, 4] = calc_beta_heterogeneity(sum(ind_ol))
+    if new_beta_heterogeneity
+        transfer_l[:, 4] = calc_beta_heterogeneity(sum(ind_l))
+        transfer_ol[:, 4] = calc_beta_heterogeneity(sum(ind_ol))
+    end
+
     # Select rows to keep
     remain_l = ages_from[.!ind_l, :]
     remain_ol = ages_to[.!ind_ol, :]
@@ -273,7 +276,7 @@ BT_mixing = function(soil, ages, _BT_pot, _depth_function, _dd, _dd_exch = dd_ex
 
                         P_transfer_l = dmass_l / soil[l,2]
                         P_transfer_ol = dmass_ol / soil[ol,2]
-                        transfer_OSL(soil, ages, l, ol, P_transfer_l, P_transfer_ol)
+                        transfer_OSL(soil, ages, l, ol, P_transfer_l, P_transfer_ol, true)
                     end
                 end
             end
@@ -298,7 +301,7 @@ BT_mounding = function(soil, ages, _BT_pot, _depth_function, _dd) # Bioturbation
                 P_transfer_l = BT_layer / soil[l,2]
                 soil[l,2] -= BT_layer
                 soil[1,2] += BT_layer
-                soil, ages = transfer_OSL(soil, ages, l, 1, P_transfer_l, 0)
+                soil, ages = transfer_OSL(soil, ages, l, 1, P_transfer_l, 0, true)
             end
             depth += soil[l,1]
         end
@@ -447,7 +450,7 @@ BT_calibration_errors = function(soil, ages, calibration_data, cal_mode=true, ca
     error_iqr = 0
     error_total = 0
     depths = unique(calibration_data[:,"depth"])
-    for d in 1:length(depths)
+    for d in eachindex(depths)
         # println(d)
         it_layer = 1
         depth_ref = 0
@@ -788,3 +791,32 @@ read_soil_ages_JLD2 = function(soil_directory, ages_directory)
     return soil, ages
 end
 
+# Statistics
+density_interval = function(a, interval)
+    bins = range(floor(minimum(a) / interval), stop=ceil(maximum(a) / interval), step=1) .* interval
+
+     # Initialize a dictionary to store the frequency of each bin
+     bin_counts = Dict{Float64, Int}()
+
+     # Count the frequency of data points in each bin
+     for bin in bins
+         bin_counts[bin] = count(x -> bin <= x < bin + interval, a)
+     end
+     dens = sort!(DataFrame(bin = collect(keys(bin_counts)) .+ interval / 2, frequency = collect(values(bin_counts))))
+
+     dens = Matrix(dens)
+
+     mode = dens[argmax(dens[:,2]), 1]
+
+     return dens, mode
+end
+
+function safe_median(sub)
+    try
+        # Calculate median, ignoring NaNs
+        return median(skipmissing(sub))
+    catch e
+        # If an error occurs, return `missing`
+        return missing
+    end
+end
