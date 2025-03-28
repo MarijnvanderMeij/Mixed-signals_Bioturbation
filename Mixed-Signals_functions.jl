@@ -1,6 +1,6 @@
 # Install and load required packages
 using Pkg
-neededPackages = [:StatsBase, :CSV, :DataFrames, :Plots, :JLD2, :KernelDensity, :KernelDensitySJ, :Statistics, :ProgressMeter, :ColorSchemes] 
+neededPackages = [:StatsBase, :CSV, :DataFrames, :Plots, :JLD2, :KernelDensity, :KernelDensitySJ, :Statistics, :ProgressMeter, :ColorSchemes, :Distributions, :StatsPlots] 
 using Pkg;
 for neededpackage in neededPackages
     (String(neededpackage) in keys(Pkg.project().dependencies)) || Pkg.add(String(neededpackage))
@@ -11,7 +11,7 @@ using Plots.PlotMeasures
 # Functions for initializing and updating soil and age arrays
 initialise_soil = function(soildepth, nlayers, layer_thickness, bleaching_depth, grains_per_layer, bd = bd) # Fill the soil and age arrays based on the parameters
     soil = zeros(Float64, nlayers, 4)   # Array of the soil profile. Index 1: thickness [m]. Index 2: mass [kg]. Index 3: midpoint depth [m]. Index 4: cumulative depth [m].
-    ages = fill(Int[],nlayers)          # Array of arrays of OSL age particles
+    ages = [zeros(Float64, grains_per_layer, 4) for _ in 1:nlayers]          # Array of arrays of OSL age particles and doses. 1: age, 2: actual dose, 3: total accumulated dose, 4: beta dose heterogeneity
     remainingsoil = soildepth
     for l in 1:nlayers
         if l==1 
@@ -32,13 +32,13 @@ initialise_soil = function(soildepth, nlayers, layer_thickness, bleaching_depth,
         end
 
         soil[l,2] = bd*soil[l,1] 
-        ages[l] = fill(0, ceil(Int32, grains_per_layer))
     end
     depth = 0
     for l in 1:nlayers
         depth += soil[l,1]/2
         soil[l,3] = depth
         depth += soil[l,1]/2
+        ages[l][:,4] .= calc_beta_heterogeneity(grains_per_layer) # add effect for beta dose heterogeneity, which stays constant in one layer, but gets reset after transport
     end
     soil[:,4]=cumsum(soil[:,1])
     return soil, ages
@@ -46,7 +46,7 @@ end
 
 update_soil_and_luminescence = function(soil, ages, bd = bd)
     soil, ages = update_layers(soil, ages, bd)
-    soil, ages = update_OSL(soil, ages)
+    soil, ages = update_luminescence(soil, ages)
     return(soil, ages)
 end
 
@@ -111,7 +111,7 @@ update_layers = function(soil, ages, bd = bd) # Split or combine layers based on
     return soil, ages
 end
 
-update_OSL = function(soil, ages) # Update OSL properties: thickness of bleaching layer and OSL ages
+update_luminescence = function(soil, ages) # Update OSL properties: thickness of bleaching layer and OSL ages
     # update thickness top layer to bleaching depth
     if soil[1,2]/bd > bleaching_depth # Layer too thick, give to layer below
         sep_fraction = (soil[1,2]/bd-bleaching_depth)/(soil[1,2]/bd)
@@ -130,14 +130,16 @@ update_OSL = function(soil, ages) # Update OSL properties: thickness of bleachin
     end
     soil = recalculate_layer_thicknesses(soil)
 
-    ages[1] = ages[1] .*0 # Bleach particles in the top layer
+    soil, ages = update_doses(soil, ages)
+
+    ages[1][:,1:2] = ages[1][:,1:2] .*0 # Bleach particles in the top layer, reset age and dose
     for l in 2:nlayers # Add a year to particles in all other layers
-        ages[l] = ages[l] .+ 1 
+        ages[l][:,1] = ages[l][:,1] .+ 1 
     end
     return soil, ages
 end
 
-transfer_OSL = function(soil, ages, layer, otherlayer, P_layer, P_otherlayer) # Transfer OSL particles in between layers, based on transfer probability
+transfer_OSL = function(soil, ages, layer, otherlayer, P_layer, P_otherlayer) # Transfer OSL particles in between layers, based on transfer probability    
     ages_from = ages[layer]
     ages_to = ages[otherlayer]
     if isnan(P_layer) || isinf(P_layer)
@@ -146,12 +148,22 @@ transfer_OSL = function(soil, ages, layer, otherlayer, P_layer, P_otherlayer) # 
     if isnan(P_otherlayer) || isinf(P_otherlayer)
         P_otherlayer = 0
     end
-
-    ind_l = sample(0:1,ProbabilityWeights([1-P_layer,P_layer]),length(ages_from)).==1
-    ind_ol = sample(0:1,ProbabilityWeights([1-P_otherlayer,P_otherlayer]),length(ages_to)).==1
     
-    ages[layer] = vcat(ages_from[map(!,ind_l)], ages_to[ind_ol])
-    ages[otherlayer] = vcat(ages_from[ind_l], ages_to[map(!,ind_ol)]) 
+    ind_l = sample(0:1,ProbabilityWeights([1-P_layer,P_layer]),size(ages_from, 1)).==1
+    ind_ol = sample(0:1,ProbabilityWeights([1-P_otherlayer,P_otherlayer]),size(ages_to, 1)).==1
+    
+    # Select rows to transfer and reset beta dose heterogeneity
+    transfer_l = ages_from[ind_l, :]
+    transfer_l[:, 4] = calc_beta_heterogeneity(sum(ind_l))
+    transfer_ol = ages_to[ind_ol, :]
+    transfer_ol[:, 4] = calc_beta_heterogeneity(sum(ind_ol))
+    # Select rows to keep
+    remain_l = ages_from[.!ind_l, :]
+    remain_ol = ages_to[.!ind_ol, :]
+    
+    ages[layer] = vcat(remain_l, transfer_ol)
+    ages[otherlayer] = vcat(remain_ol, transfer_l)
+
     return soil, ages
 end
 
@@ -161,6 +173,64 @@ recalculate_layer_thicknesses = function(soil, bd = bd) # Update layer thickness
     end
     return soil
 end
+
+
+# Functions for doses and dose rates
+function update_doses(soil, ages)
+    # accumulated mass hg cm-2, midpoint of layers as reference
+    total_mass = (vcat(0,cumsum(soil[1:(nlayers-1),1])) + soil[:,1]./2) .* bd .* .001 
+
+    for i in 1:nlayers
+        profile = ages[i][:,2:4]
+        # cosmic rays and dry dose rate
+        profile[:,1:2] .+= (cosmic_dose_rate(total_mass[i]) .+ dry_dose_rate[i] .* profile[:,3]) .* dt
+        ages[i][:,2:4] = profile
+    end
+    return soil, ages
+end
+
+ cosmic_dose_rate = function(hgcm, latitude = 51.133481, longitude = 10.018343)
+    # based on code from calc_CosmicDoseRate from the R Luminescence package
+    latitude = 51.133481
+    longitude = 10.018343
+    d0_all = fill(0.0, length(hgcm))
+    C = 6072
+    B = 0.00055
+    d = 11.6
+    alpha = 1.68
+    a = 75
+    H = 212
+    
+    for i in eachindex(hgcm)
+    
+        if (hgcm[i] * 100 >= 167)
+            d0 = (C/((((hgcm[i] + d)^alpha) + a) * (hgcm[i] + H))) * exp(-B * hgcm[i])
+        end
+        
+        if (hgcm[i] * 100 < 167)
+            temp_hgcm = hgcm[i] * 100
+            d0_ph = (C/((((hgcm[i] + d)^alpha) + a) * (hgcm[i] + 
+                H))) * exp(-B * hgcm[i])
+            if (hgcm[i] * 100 < 40)
+                d0 = -6 * 10^-8 * temp_hgcm^3 + 2 * 10^-5 * temp_hgcm^2 - 0.0025 * temp_hgcm + 0.2969
+            else
+                d0 = 2 * 10^-6 * temp_hgcm^2 - 8e-04 * temp_hgcm + 
+                0.2535
+            end
+        
+            if (d0_ph > d0)
+                d0 = d0_ph
+            end
+        end
+        d0_all[i] = d0
+    end
+    return d0_all ./ 1000
+ end
+
+ calc_beta_heterogeneity = function(n_values)
+    return max.(0,rand(Normal(1, beta_dose_variation), n_values))
+
+ end
 
 # Bioturbation functions
 BT_mixing = function(soil, ages, _BT_pot, _depth_function, _dd, _dd_exch = dd_exch) # Bioturbation by subsurface mixing
